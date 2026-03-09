@@ -1,0 +1,441 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Instagram-export → Todo list</title>
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<style>
+  :root{font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial;}
+  body{margin:20px;color:#111;background:#f6f7fb}
+  header{display:flex;gap:12px;align-items:center;margin-bottom:14px}
+  h1{font-size:16px;margin:0;font-weight:600}
+  .controls{display:flex;gap:8px;flex-wrap:wrap}
+  button,input[type=file],select{padding:8px 10px;border-radius:6px;border:1px solid #c9ccd6;background:#fff;cursor:pointer}
+  input[type=file]{padding:6px}
+  main{display:flex;gap:16px}
+  .left, .right{background:#fff;padding:14px;border-radius:8px;box-shadow:0 1px 3px rgba(20,20,40,0.05)}
+  .left{flex:1;min-width:360px}
+  .right{width:360px}
+  .task{display:flex;gap:10px;align-items:flex-start;padding:8px;border-bottom:1px solid #f0f1f6}
+  .task:last-child{border-bottom:0}
+  .task .meta{flex:1}
+  .task .meta > div{margin-bottom:6px}
+  .task .meta .sender{font-weight:600;font-size:13px}
+  .task .meta .time{font-size:12px;color:#666}
+  .task .meta .text{font-size:13px;color:#222}
+  .task img{width:110px;height:64px;object-fit:cover;border-radius:6px;border:1px solid #e6e6ee}
+  .small{font-size:13px;color:#444}
+  .actions{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}
+  .pill{padding:6px 8px;border-radius:6px;border:1px solid #e6e7ef;background:#fafbff;font-size:13px}
+  .filter{display:flex;gap:6px;align-items:center}
+  .dropzone{border:2px dashed #dfe3f0;padding:10px;border-radius:8px;text-align:center;color:#666}
+  label{display:inline-block}
+  textarea{width:100%;height:120px;margin-top:10px}
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <h1>IG → Todo (local) — import your export & attach screenshots</h1>
+    <div class="small">Load the Instagram HTML export, attach screenshots, mark done. Data saved locally.</div>
+  </div>
+  <div style="margin-left:auto" class="controls">
+    <input id="fileInput" type="file" accept=".html,.htm" />
+    <button id="parseBtn">Parse loaded file</button>
+    <button id="newTaskBtn">New task</button>
+    <button id="exportJson">Export JSON</button>
+    <button id="exportCsv">Export CSV</button>
+    <button id="copyMd">Copy Markdown</button>
+  </div>
+</header>
+
+<main>
+  <section class="left">
+    <div class="dropzone" id="pasteZone">Or paste the export HTML here (press Ctrl+V)</div>
+    <div style="margin-top:12px;display:flex;gap:8px;align-items:center">
+      <div class="filter pill">
+        <label><input type="checkbox" id="showDone" /> show done</label>
+      </div>
+      <div class="pill small">Tasks: <span id="count">0</span></div>
+      <div style="margin-left:auto" class="small">Tip: select tasks and press the action buttons on the right pane.</div>
+    </div>
+
+    <div id="list" style="margin-top:12px"></div>
+  </section>
+
+  <aside class="right">
+    <div><strong>Selected task</strong></div>
+    <div id="selectedInfo" style="margin-top:10px">None</div>
+
+    <div class="actions" style="margin-top:12px">
+      <button id="markDone">Mark done</button>
+      <button id="markUndone">Mark undone</button>
+      <button id="attachImage">Attach screenshot</button>
+      <input id="imageInput" type="file" accept="image/*" style="display:none" />
+      <button id="removeTask">Remove</button>
+      <button id="exportSelected">Export selected</button>
+    </div>
+
+    <hr style="margin:12px 0;border:none;border-top:1px solid #f0f1f6" />
+    <div>
+      <div class="small" style="font-weight:600">Persistence</div>
+      <div class="small">Data kept in localStorage under key <code>ig_todo_v1</code>.</div>
+      <div style="margin-top:8px;">
+        <button id="clearStorage">Clear local data</button>
+        <button id="downloadAll">Download JSON file</button>
+      </div>
+    </div>
+
+    <hr style="margin:12px 0;border:none;border-top:1px solid #f0f1f6" />
+    <div class="small" style="font-weight:600">Usage tips</div>
+    <ol class="small" style="padding-left:14px">
+      <li>Load the Instagram HTML export file (<em>file → open</em>), or paste the HTML into the dropzone.</li>
+      <li>Click a task, attach a screenshot (drag a PNG/JPG into the preview area or use Attach screenshot).</li>
+      <li>Click Copy Markdown to get a clipboard-ready list for pasting into your other app.</li>
+      <li>If you need automatic screenshots, use a headless tool (Puppeteer) or a screenshot browser extension and drag the file in here.</li>
+    </ol>
+  </aside>
+</main>
+
+<textarea id="log" placeholder="Raw parsed output (for debugging)"></textarea>
+
+<script>
+/* IG → Todo local app
+   - robust parsing: find <a href="...instagram..."> anchors, find sender & timestamp nearby
+   - store tasks in localStorage key 'ig_todo_v1'
+*/
+(() => {
+  const STORAGE_KEY = 'ig_todo_v1';
+  let tasks = [];
+  let selectedId = null;
+  let lastParsedHtml = '';
+
+  // helpers
+  const byId = id => document.getElementById(id);
+  const save = () => localStorage.setItem(STORAGE_KEY, JSON.stringify(tasks));
+  const load = () => {
+    try {
+      tasks = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]');
+    } catch(e){ tasks = []; }
+  };
+  const formatTime = t => t || '';
+
+  // render
+  function renderList() {
+    const list = byId('list');
+    const showDone = byId('showDone').checked;
+    list.innerHTML = '';
+    const filtered = tasks.filter(t => showDone || !t.done);
+    filtered.forEach(t => {
+      const el = document.createElement('div');
+      el.className = 'task';
+      el.dataset.id = t.id;
+      el.innerHTML = `
+        <input type="checkbox" class="check" ${t.done ? 'checked' : ''}/>
+        <div class="meta">
+          <div class="sender">${escapeHtml(t.sender||'')}</div>
+          <div class="time">${escapeHtml(t.time||'')}</div>
+          <div class="text">${escapeHtml(shorten(t.text||'', 220))}</div>
+          <div style="margin-top:6px"><a href="${escapeAttr(t.url||'#')}" target="_blank" rel="noreferrer">${t.url? 'Open link' : ''}</a></div>
+        </div>
+        <div>
+          ${t.screenshot ? `<img src="${t.screenshot}" alt="screenshot" />` : `<div style="width:110px;height:64px;display:flex;align-items:center;justify-content:center;color:#999;border-radius:6px;border:1px solid #f0f0f6">no image</div>`}
+        </div>
+      `;
+      // events
+      el.querySelector('.check').addEventListener('change', ev => {
+        const id = el.dataset.id;
+        markDoneById(id, ev.target.checked);
+      });
+      el.addEventListener('click', e => {
+        // clicking anywhere selects
+        if (e.target.tagName.toLowerCase() === 'a') return;
+        selectTask(el.dataset.id);
+      });
+      // drag & drop support to attach an image
+      el.addEventListener('dragover', ev => { ev.preventDefault(); el.style.background='#fbfdff'; });
+      el.addEventListener('dragleave', ev => { el.style.background=''; });
+      el.addEventListener('drop', ev => {
+        ev.preventDefault();
+        el.style.background='';
+        const file = ev.dataTransfer.files && ev.dataTransfer.files[0];
+        if (file && file.type.startsWith('image/')) {
+          const reader = new FileReader();
+          reader.onload = () => { attachImageToTask(el.dataset.id, reader.result); };
+          reader.readAsDataURL(file);
+        }
+      });
+      list.appendChild(el);
+    });
+    byId('count').textContent = tasks.length;
+  }
+
+  function shorten(s,len){ return s.length>len ? s.slice(0,len-1)+'…' : s; }
+  function escapeHtml(s){ return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+  function escapeAttr(s){ return (s||'').replace(/"/g,'&quot;').replace(/'/g,"&#39;"); }
+
+  // selection & utils
+  function selectTask(id) {
+    selectedId = id;
+    const t = tasks.find(x => x.id == id);
+    const info = byId('selectedInfo');
+    if (!t) { info.innerHTML = 'None'; return; }
+    info.innerHTML = `<div style="font-weight:600">${escapeHtml(t.sender||'')}</div>
+      <div class="small">${escapeHtml(t.time||'')}</div>
+      <div style="margin-top:8px">${escapeHtml(t.text||'')}</div>
+      <div style="margin-top:8px"><a href="${escapeAttr(t.url||'#')}" target="_blank">Open link</a></div>
+      ${t.screenshot? `<div style="margin-top:8px"><img style="width:100%;border-radius:6px" src="${t.screenshot}" /></div>` : ''}`;
+  }
+
+  function markDoneById(id, done=true) {
+    const t = tasks.find(x => x.id == id);
+    if (!t) return;
+    t.done = !!done;
+    save(); renderList(); selectTask(id);
+  }
+
+  function attachImageToTask(id, dataUrl) {
+    const t = tasks.find(x => x.id == id);
+    if (!t) return;
+    t.screenshot = dataUrl;
+    save(); renderList(); selectTask(id);
+  }
+
+  function removeTaskById(id) {
+    tasks = tasks.filter(x => x.id != id);
+    save(); renderList(); selectedId = null; selectTask(null);
+  }
+
+  // exports
+  function exportJson(selectedOnly=false) {
+    const arr = selectedOnly && selectedId ? tasks.filter(t => t.id == selectedId) : tasks;
+    const blob = new Blob([JSON.stringify(arr, null, 2)], {type:'application/json'});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a'); a.href = url; a.download = 'ig-todo.json'; a.click();
+    URL.revokeObjectURL(url);
+  }
+  function exportCsv() {
+    const rows = [['id','done','sender','time','text','url','screenshotPresent']];
+    tasks.forEach(t => rows.push([t.id,t.done?'1':'0',csvSafe(t.sender),csvSafe(t.time),csvSafe(t.text),t.url?t.url:'', t.screenshot? '1':'' ]));
+    const csv = rows.map(r => r.join(',')).join('\n');
+    const blob = new Blob([csv], {type:'text/csv'}); const url=URL.createObjectURL(blob);
+    const a=document.createElement('a'); a.href=url; a.download='ig-todo.csv'; a.click();
+    URL.revokeObjectURL(url);
+  }
+  function csvSafe(s){ return '"'+(s||'').replace(/"/g,'""')+'"'; }
+
+  function copyMarkdown() {
+    // copy all tasks (or selected only)
+    const arr = selectedId ? tasks.filter(t => t.id == selectedId) : tasks;
+    const md = arr.map(t => {
+      const check = t.done? '[x]':'[ ]';
+      const time = t.time ? ` (${t.time})` : '';
+      const head = `- ${check} **${t.sender || ''}**${time}: ${t.text ? t.text.replace(/\n/g,' ') : ''}`;
+      const link = t.url ? `\n  Link: ${t.url}` : '';
+      const img = t.screenshot ? `\n  Screenshot: (attached in-app)` : '';
+      return head + link + img;
+    }).join('\n\n');
+    navigator.clipboard.writeText(md).then(()=>{
+      alert('Markdown copied to clipboard.');
+    }, ()=> alert('Copy failed.'));
+  }
+
+  // parsing logic: parse HTML text and find anchor tags to instagram posts
+  function parseExportHtml(text) {
+    // keep log for debugging
+    byId('log').value = text.slice(0, 20000); // not full dump
+    lastParsedHtml = text;
+
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(text, 'text/html');
+
+    // find all Instagram links (post/reel)
+    const anchors = Array.from(doc.querySelectorAll('a[href*="instagram.com/"]'));
+    const candidates = anchors.filter(a => /instagram\.com\/(p|reel|tv)\//i.test(a.href));
+    const found = [];
+
+    candidates.forEach((a, idx) => {
+      // find nearest container that has sender (h2) or a timestamp nearby
+      let container = a.closest('div[class]') || a.parentElement || a;
+      // climb a few levels to try to find sender/time
+      for (let i=0;i<6;i++){
+        if (!container) break;
+        // if container contains an <h2> or a date string, stop
+        if (container.querySelector && (container.querySelector('h2') || /,\s*\d{4}/.test(container.textContent||''))) break;
+        container = container.parentElement;
+      }
+      // find sender
+      let sender = '';
+      if (container) {
+        const h2 = container.querySelector('h2');
+        if (h2) sender = h2.textContent.trim();
+      }
+      // if no sender, try look up the DOM (previous h2)
+      if (!sender) {
+        let p = a;
+        for (let i=0;i<8;i++){
+          p = p.previousElementSibling || p.parentElement;
+          if (!p) break;
+          const h2 = p.querySelector && p.querySelector('h2');
+          if (h2){ sender = h2.textContent.trim(); break; }
+        }
+      }
+      // find timestamp (look nearby for text like "Mar 07, 2026 7:33 am")
+      let time = '';
+      const parentText = (container && container.parentElement) ? container.parentElement.textContent : (container?container.textContent:'');
+      // search in nearby siblings for a date-like string
+      const dateRegex = /[A-Za-z]{3,9}\s+\d{1,2},\s+\d{4}(?:\s+\d{1,2}:\d{2}\s*(?:am|pm)?)?/i;
+      // check siblings
+      let cur = container;
+      for (let i=0;i<6 && cur; i++){
+        const txt = cur.textContent || '';
+        const m = txt.match(dateRegex);
+        if (m){ time = m[0]; break; }
+        cur = cur.nextElementSibling;
+      }
+      // message text: nearest containing block's text minus link and sender/time
+      let text = '';
+      if (container){
+        text = container.textContent || '';
+        // remove sender and time
+        if (sender) text = text.replace(sender,'');
+        if (time) text = text.replace(time,'');
+        // remove the visible url text
+        text = text.replace(a.textContent||'','');
+        text = text.trim();
+      }
+
+      found.push({
+        sender: sender || 'Unknown',
+        time: time || '',
+        text: text || '',
+        url: a.href,
+        id: Date.now().toString(36) + '_' + idx,
+        done: false,
+        screenshot: null
+      });
+    });
+
+    // fallback: if no candidates, try to find containers that contain 'You sent an attachment' and an <a>
+    if (found.length === 0) {
+      const blocks = Array.from(doc.querySelectorAll('div')).filter(d => (d.textContent||'').includes('You sent an attachment'));
+      blocks.forEach((b, idx) => {
+        const a = b.querySelector('a[href*="instagram.com"]');
+        if (!a) return;
+        const h2 = b.closest('div') && (b.closest('div').querySelector('h2') || b.querySelector('h2'));
+        found.push({
+          sender: h2 ? h2.textContent.trim() : 'Unknown',
+          time: '',
+          text: (b.textContent || '').replace('You sent an attachment','').trim(),
+          url: a.href,
+          id: Date.now().toString(36) + '_fb_' + idx,
+          done: false,
+          screenshot: null
+        });
+      });
+    }
+
+    return found;
+  }
+
+  // UI wiring
+  function wire() {
+    // file input: read file text
+    const fileInput = byId('fileInput');
+    let loadedFileText = '';
+    fileInput.addEventListener('change', ev => {
+      const f = ev.target.files[0];
+      if (!f) return;
+      const reader = new FileReader();
+      reader.onload = () => {
+        loadedFileText = reader.result;
+        byId('pasteZone').textContent = 'File loaded: ' + f.name + ' — click Parse loaded file';
+      };
+      reader.readAsText(f);
+    });
+
+    byId('parseBtn').addEventListener('click', () => {
+      const txt = loadedFileText || byId('pasteZone').textContent;
+      if (!txt || txt.trim().length < 40) { alert('No export HTML loaded. Use the file chooser or paste the HTML into the dropzone.'); return; }
+      const parsed = parseExportHtml(txt);
+      // append deduplicated by url
+      parsed.forEach(p => {
+        if (!tasks.some(t => t.url === p.url)) tasks.unshift(p);
+      });
+      save(); renderList();
+      alert('Parsed ' + parsed.length + ' links (duplicates ignored).');
+    });
+
+    // paste into dropzone
+    const dz = byId('pasteZone');
+    dz.addEventListener('paste', ev => {
+      const txt = (ev.clipboardData || window.clipboardData).getData('text');
+      if (txt) {
+        byId('pasteZone').textContent = 'HTML pasted — click Parse loaded file';
+        loadedFileText = txt;
+      }
+    });
+
+    // new task
+    byId('newTaskBtn').addEventListener('click', () => {
+      const s = prompt('Enter link (optional) — leave empty for plain note');
+      const text = prompt('Enter short description / note');
+      const t = {
+        sender: 'manual',
+        time: new Date().toLocaleString(),
+        text: text || '',
+        url: s || '',
+        id: Date.now().toString(36),
+        done: false,
+        screenshot: null
+      };
+      tasks.unshift(t);
+      save(); renderList();
+    });
+
+    // show done toggle
+    byId('showDone').addEventListener('change', renderList);
+
+    // right pane actions
+    byId('markDone').addEventListener('click', () => { if (!selectedId) return alert('Select a task'); markDoneById(selectedId,true); });
+    byId('markUndone').addEventListener('click', () => { if (!selectedId) return alert('Select a task'); markDoneById(selectedId,false); });
+    byId('removeTask').addEventListener('click', () => { if (!selectedId) return alert('Select a task'); if (confirm('Remove selected task?')) removeTaskById(selectedId); });
+    byId('attachImage').addEventListener('click', () => byId('imageInput').click());
+    byId('imageInput').addEventListener('change', ev => {
+      const f = ev.target.files[0]; if (!f || !selectedId) return;
+      const reader = new FileReader();
+      reader.onload = () => attachImageToTask(selectedId, reader.result);
+      reader.readAsDataURL(f);
+    });
+    byId('exportJson').addEventListener('click', () => exportJson(false));
+    byId('downloadAll').addEventListener('click', () => exportJson(false));
+    byId('exportCsv').addEventListener('click', () => exportCsv());
+    byId('copyMd').addEventListener('click', () => copyMarkdown());
+    byId('clearStorage').addEventListener('click', () => { if (confirm('Clear local saved tasks?')) { localStorage.removeItem(STORAGE_KEY); tasks=[]; renderList(); }});
+    byId('exportSelected').addEventListener('click', () => {
+      if (!selectedId) return alert('Select a task first.');
+      exportJson(true);
+    });
+    byId('removeTask').addEventListener('dblclick', () => { if (!selectedId) return; if (confirm('Permanently remove selected task?')) removeTaskById(selectedId); });
+
+    // keyboard shortcuts (simple)
+    window.addEventListener('keydown', e => {
+      if (e.key === 'n' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); document.getElementById('newTaskBtn').click(); }
+      if (e.key === 'd' && selectedId) { e.preventDefault(); markDoneById(selectedId, true); }
+    });
+
+    // initial render
+    renderList();
+  }
+
+  // small helpers
+  function csvSafe(s){ return '"'+(s||'').replace(/"/g,'""')+'"'; }
+
+  // initial load
+  load();
+  wire();
+  if (tasks.length) { renderList(); }
+})();
+</script>
+</body>
+</html>
